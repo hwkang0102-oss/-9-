@@ -244,7 +244,7 @@ module RISC_TOY (
     REGFILE  #(.AW(5), .ENTRY(32))  RegFile (
                     .CLK    (CLK),
                     .RSTN   (RSTN),
-                    .WEN    (WB_RegWrite),
+                    .WEN    (~WB_RegWrite),
                     .WA     (WB_Rd),
                     .DI     (WB_data),
                     .RA0    (Read_Addr_0),
