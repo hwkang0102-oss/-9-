@@ -6,16 +6,16 @@
  *******************************************************************************/
 
 module CUSTOM_IP (
-    input  wire        CLK,     // 시스템 메인 클록 신호
-    input  wire        RSTN,    // 시스템 액티브 로우(Active-Low) 리셋 신호
+    input  wire        CLK,      // 시스템 메인 클록 신호
+    input  wire        RSTN,     // 시스템 액티브 로우(Active-Low) 리셋 신호
     
     // RISC_TOY Interface (호스트 CPU 통신용 제어 인터페이스)
-    input  wire [31:0] CON,     // CPU R[31]에서 인입: CON[0]=Start, CON[31:16]=Epsilon
+    input  wire [31:0] CON,      // CPU R[31]에서 인입: CON[0]=Start, CON[31:16]=Epsilon
     
     // Data Memory Interface (데이터 메모리 직접 연결 인터페이스)
-    input  wire [31:0] IPIN,    // 데이터 메모리에서 들어오는 32비트 패킷 버스
-    output reg  [31:0] IPOUT,   // 최종 출력 버스: [31]=Hit 플래그, [30:0]=최종 계산된 t 값
-    output reg         IP_VALID // 호스트 CPU에게 데이터 준비 완료를 알리는 핸드셰이크 플래그
+    input  wire [31:0] IPIN,     // 데이터 메모리에서 들어오는 32비트 패킷 버스
+    output reg  [31:0] IPOUT,    // 최종 출력 버스: [31]=Hit 플래그, [30:0]=최종 계산된 t 값
+    output reg         IP_VALID  // 호스트 CPU에게 데이터 준비 완료를 알리는 핸드셰이크 플래그
 );
 
     // =========================================================================
@@ -80,20 +80,33 @@ module CUSTOM_IP (
     reg [31:0]        cache_hit_data; 
     reg               cache_valid;    
     
-    wire signed [15:0] diff_x, diff_y, diff_z; 
-    
-    assign diff_x = (ray_dir_x > cache_dir_x) ? (ray_dir_x - cache_dir_x) : (cache_dir_x - ray_dir_x); 
-    assign diff_y = (ray_dir_y > cache_dir_y) ? (ray_dir_y - cache_dir_y) : (cache_dir_y - ray_dir_y);
-    assign diff_z = (ray_dir_z > cache_dir_z) ? (ray_dir_z - cache_dir_z) : (cache_dir_z - ray_dir_z);
+    // [오류 수정 A] 오버플로우 방지를 위한 17비트 부호 확장 및 안전한 절댓값 계산
+    wire signed [16:0] ext_ray_dir_x = {ray_dir_x[15], ray_dir_x};
+    wire signed [16:0] ext_cache_dir_x = {cache_dir_x[15], cache_dir_x};
+    wire signed [16:0] diff_x_ext = ext_ray_dir_x - ext_cache_dir_x;
+    wire signed [16:0] diff_x_abs = (diff_x_ext < 0) ? -diff_x_ext : diff_x_ext;
 
-    wire is_coherent = (diff_x < epsilon_th) && (diff_y < epsilon_th) && (diff_z < epsilon_th) && cache_valid; 
+    wire signed [16:0] ext_ray_dir_y = {ray_dir_y[15], ray_dir_y};
+    wire signed [16:0] ext_cache_dir_y = {cache_dir_y[15], cache_dir_y};
+    wire signed [16:0] diff_y_ext = ext_ray_dir_y - ext_cache_dir_y;
+    wire signed [16:0] diff_y_abs = (diff_y_ext < 0) ? -diff_y_ext : diff_y_ext;
+
+    wire signed [16:0] ext_ray_dir_z = {ray_dir_z[15], ray_dir_z};
+    wire signed [16:0] ext_cache_dir_z = {cache_dir_z[15], cache_dir_z};
+    wire signed [16:0] diff_z_ext = ext_ray_dir_z - ext_cache_dir_z;
+    wire signed [16:0] diff_z_abs = (diff_z_ext < 0) ? -diff_z_ext : diff_z_ext;
+
+    // epsilon_th 역시 17비트로 부호 확장하여 정확하게 비교
+    wire signed [16:0] ext_epsilon = {epsilon_th[15], epsilon_th};
+    wire is_coherent = (diff_x_abs < ext_epsilon) && (diff_y_abs < ext_epsilon) && (diff_z_abs < ext_epsilon) && cache_valid; 
     
     wire enable_core_pipeline = parsing_done && !is_coherent; 
 
     // =========================================================================
     // [4] T-Intersection Pipeline (Stage 1 & 2)
     // =========================================================================
-    reg [2:0] pipe_valid;
+    // [오류 수정 B] 실제 데이터 패스 깊이(2 Stages)에 맞춰 파이프라인 유효 신호 크기 축소 (3비트 -> 2비트)
+    reg [1:0] pipe_valid;
 
     // [Stage 1] 하드웨어 곱셈기 (결과 포맷: Q16.16)
     reg signed [31:0] stg1_tx1, stg1_tx2;
@@ -105,11 +118,10 @@ module CUSTOM_IP (
             stg1_tx1   <= 32'd0; stg1_tx2   <= 32'd0;
             stg1_ty1   <= 32'd0; stg1_ty2   <= 32'd0;
             stg1_tz1   <= 32'd0; stg1_tz2   <= 32'd0;
-            pipe_valid <= 3'b0;
+            pipe_valid <= 2'b0;
         end else begin
             pipe_valid[0] <= enable_core_pipeline;
-            pipe_valid[1] <= pipe_valid[0];
-            pipe_valid[2] <= pipe_valid[1]; 
+            pipe_valid[1] <= pipe_valid[0]; 
             
             // [오류 수정 1] 단일 펄스 이후 강제 Flush 구문 제거 -> 값 안전하게 유지(Latch)
             if (enable_core_pipeline) begin 
@@ -128,7 +140,7 @@ module CUSTOM_IP (
     reg signed [15:0] r_tmin_y, r_tmax_y;
     reg signed [15:0] r_tmin_z, r_tmax_z;
 
-    // [오류 수정 3] Q16.16 -> Q8.8 복원 시 비트 슬라이싱 [23:8] 적용 및 부호 캐스팅
+    // [오류 수정 3] Q16.16 -> Q8.8 복원 시 비트 슬라이싱 [23:8] 적용 및 부호 캐스팅 유지 (정상 범주 내 동작 가정)
     wire signed [15:0] scaled_tx1 = $signed(stg1_tx1[23:8]);
     wire signed [15:0] scaled_tx2 = $signed(stg1_tx2[23:8]);
     wire signed [15:0] scaled_ty1 = $signed(stg1_ty1[23:8]);
@@ -154,7 +166,7 @@ module CUSTOM_IP (
     end
 
     // =========================================================================
-    // [5] Reduction Tree & Final Output
+    // [5] Reduction Tree & Final Output (Combinational Logic)
     // =========================================================================
     wire signed [15:0] t_min_inter = (r_tmin_x > r_tmin_y) ? r_tmin_x : r_tmin_y; 
     wire signed [15:0] t_min_final = (t_min_inter > r_tmin_z) ? t_min_inter : r_tmin_z; 
@@ -163,7 +175,12 @@ module CUSTOM_IP (
     wire signed [15:0] t_max_final = (t_max_inter < r_tmax_z) ? t_max_inter : r_tmax_z; 
 
     wire        pipeline_hit             = (t_max_final >= t_min_final) && (t_max_final >= 16'sd0); 
-    wire [31:0] pipeline_computed_result = { pipeline_hit, 15'd0, t_min_final }; 
+    
+    // [오류 수정 C] 광선이 Box 내부에서 시작될 경우 t_min_final은 음수가 됨. 이때는 t_max_final을 교차점으로 사용해야 함.
+    wire signed [15:0] t_hit_final       = (t_min_final < 16'sd0) ? t_max_final : t_min_final;
+    
+    // [오류 수정 D] 남은 15비트 패딩 시 t_hit_final의 부호에 맞추어 부호 확장을 적용 (안정성 강화)
+    wire [31:0] pipeline_computed_result = { pipeline_hit, {15{t_hit_final[15]}}, t_hit_final }; 
 
     // 출력 다중화기 제어 
     always @(posedge CLK or negedge RSTN) begin 
@@ -177,12 +194,13 @@ module CUSTOM_IP (
             IP_VALID <= 1'b0; 
 
             if (parsing_done && is_coherent) begin
-                // [Smart Bypass] 
+                // [Smart Bypass] 캐시 히트 시 파이프라인 연산 스킵
                 IPOUT    <= cache_hit_data;
                 IP_VALID <= 1'b1;
             end 
-            else if (pipe_valid[2]) begin 
-                // [Normal Compute] 
+            // [오류 수정 E] 파이프라인 단계에 정확하게 맞추어 pipe_valid[1]에서 결과 래치
+            else if (pipe_valid[1]) begin 
+                // [Normal Compute] 파이프라인 최종 결과 출력 및 캐시 갱신
                 IPOUT          <= pipeline_computed_result;
                 IP_VALID       <= 1'b1;
                 
