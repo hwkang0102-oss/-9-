@@ -21,14 +21,16 @@ module CUSTOM_IP (
     // =========================================================================
     // [1] System Control: 제어 신호 및 파라미터 추출
     // =========================================================================
+    // [보완] CPU 컨트롤 레지스터 매핑 및 임계값 부호 확장 캐스팅
     wire               ip_start   = CON[0]; 
     wire signed [15:0] epsilon_th = $signed(CON[31:16]); 
 
     // =========================================================================
     // [2] Ray Data Parser: 입출력 전처리 및 패킷 분해
     // =========================================================================
-    reg [2:0]   packet_cnt; 
+    reg [2:0]  packet_cnt; 
     
+    // [보완] 광선(Ray) 및 바운딩 박스(AABB) 기하학적 데이터 레지스터 (Q8.8 포맷)
     reg signed [15:0] ray_orig_x, ray_orig_y, ray_orig_z; 
     reg signed [15:0] ray_inv_x,  ray_inv_y,  ray_inv_z;
     reg signed [15:0] ray_dir_x,  ray_dir_y,  ray_dir_z;
@@ -39,6 +41,7 @@ module CUSTOM_IP (
 
     always @(posedge CLK or negedge RSTN) begin 
         if (!RSTN) begin 
+            // [보완] 시스템 리셋 시 파서 및 모든 기하학적 레지스터 초기화
             packet_cnt   <= 3'd0;
             parsing_done <= 1'b0;
             
@@ -48,6 +51,7 @@ module CUSTOM_IP (
             box_min_x    <= 16'd0; box_min_y    <= 16'd0; box_min_z    <= 16'd0;
             box_max_x    <= 16'd0; box_max_y    <= 16'd0; box_max_z    <= 16'd0;
         end else if (ip_start) begin 
+            // [보완] 8클록 주기로 16개의 패킷 워드를 순차적으로 분해하여 레지스터에 래치
             if (packet_cnt == 3'd7) begin
                 packet_cnt   <= 3'd0;
                 parsing_done <= 1'b1; 
@@ -68,6 +72,7 @@ module CUSTOM_IP (
                 default: begin end 
             endcase
         end else begin 
+            // [보완] ip_start가 비활성화되면 파서를 안전하게 초기 상태로 되돌림
             packet_cnt   <= 3'd0;
             parsing_done <= 1'b0;
         end 
@@ -78,27 +83,30 @@ module CUSTOM_IP (
     // =========================================================================
     reg signed [15:0] cache_dir_x, cache_dir_y, cache_dir_z; 
     reg [31:0]        cache_hit_data; 
-    reg               cache_valid;    
+    reg               cache_valid;  
     
     // [오류 수정 A] 오버플로우 방지를 위한 17비트 부호 확장 및 안전한 절댓값 계산
-    wire signed [16:0] ext_ray_dir_x = {ray_dir_x[15], ray_dir_x};
-    wire signed [16:0] ext_cache_dir_x = {cache_dir_x[15], cache_dir_x};
+    // [오류 수정 G] 합성 툴의 Implicit Unsigned Cast 경고를 원천 차단하기 위해 $signed 명시적 래핑 추가
+    wire signed [16:0] ext_ray_dir_x = $signed({ray_dir_x[15], ray_dir_x});
+    wire signed [16:0] ext_cache_dir_x = $signed({cache_dir_x[15], cache_dir_x});
     wire signed [16:0] diff_x_ext = ext_ray_dir_x - ext_cache_dir_x;
     wire signed [16:0] diff_x_abs = (diff_x_ext < 0) ? -diff_x_ext : diff_x_ext;
 
-    wire signed [16:0] ext_ray_dir_y = {ray_dir_y[15], ray_dir_y};
-    wire signed [16:0] ext_cache_dir_y = {cache_dir_y[15], cache_dir_y};
+    wire signed [16:0] ext_ray_dir_y = $signed({ray_dir_y[15], ray_dir_y});
+    wire signed [16:0] ext_cache_dir_y = $signed({cache_dir_y[15], cache_dir_y});
     wire signed [16:0] diff_y_ext = ext_ray_dir_y - ext_cache_dir_y;
     wire signed [16:0] diff_y_abs = (diff_y_ext < 0) ? -diff_y_ext : diff_y_ext;
 
-    wire signed [16:0] ext_ray_dir_z = {ray_dir_z[15], ray_dir_z};
-    wire signed [16:0] ext_cache_dir_z = {cache_dir_z[15], cache_dir_z};
+    wire signed [16:0] ext_ray_dir_z = $signed({ray_dir_z[15], ray_dir_z});
+    wire signed [16:0] ext_cache_dir_z = $signed({cache_dir_z[15], cache_dir_z});
     wire signed [16:0] diff_z_ext = ext_ray_dir_z - ext_cache_dir_z;
     wire signed [16:0] diff_z_abs = (diff_z_ext < 0) ? -diff_z_ext : diff_z_ext;
 
-    // epsilon_th 역시 17비트로 부호 확장하여 정확하게 비교
-    wire signed [16:0] ext_epsilon = {epsilon_th[15], epsilon_th};
-    wire is_coherent = (diff_x_abs < ext_epsilon) && (diff_y_abs < ext_epsilon) && (diff_z_abs < ext_epsilon) && cache_valid; 
+    // [오류 수정 G 적용] $signed 래핑으로 엄격한 부호 있는 정수 확장 보장
+    wire signed [16:0] ext_epsilon = $signed({epsilon_th[15], epsilon_th});
+    
+    // [오류 수정 H] 임계값(Epsilon) 비교 논리를 < 에서 <= 로 수정하여 Epsilon이 0(완전 일치)일 때도 캐시가 정상 동작하도록 수정
+    wire is_coherent = (diff_x_abs <= ext_epsilon) && (diff_y_abs <= ext_epsilon) && (diff_z_abs <= ext_epsilon) && cache_valid; 
     
     wire enable_core_pipeline = parsing_done && !is_coherent; 
 
@@ -186,7 +194,7 @@ module CUSTOM_IP (
     // [오류 수정 D] 남은 15비트 패딩 시 t_hit_final의 부호에 맞추어 부호 확장을 적용 (안정성 강화)
     wire [31:0] pipeline_computed_result = { pipeline_hit, {15{t_hit_final[15]}}, t_hit_final }; 
 
-    // 출력 다중화기 제어 
+    // [보완] 최종 출력 다중화기 제어 및 캐시 업데이트
     always @(posedge CLK or negedge RSTN) begin 
         if (!RSTN) begin
             IPOUT          <= 32'd0;
@@ -195,6 +203,7 @@ module CUSTOM_IP (
             cache_hit_data <= 32'd0;
             cache_valid    <= 1'b0;  
         end else begin
+            // [보완] IP_VALID는 기본적으로 0으로 떨어지며, 유효한 사이클에서만 1클록 펄스를 생성함
             IP_VALID <= 1'b0; 
 
             if (parsing_done && is_coherent) begin
@@ -208,6 +217,7 @@ module CUSTOM_IP (
                 IPOUT          <= pipeline_computed_result;
                 IP_VALID       <= 1'b1;
                 
+                // [보완] 파서가 아직 덮어쓰기 전의 이전 광선 데이터를 안전하게 캐싱 (정확한 사이클 타이밍)
                 cache_dir_x    <= ray_dir_x;
                 cache_dir_y    <= ray_dir_y;
                 cache_dir_z    <= ray_dir_z;
