@@ -162,4 +162,96 @@ module CUSTOM_IP (
 
     // 스케일 다운된 32비트 연산 결과물에서 하위 유효 부호 대역 16비트를 정밀 추출
     wire signed [15:0] scaled_tx1 = shifted_tx1[15:0];
-    wire signed [15:0] scaled_tx2 = shifted_tx2
+    wire signed [15:0] scaled_tx2 = shifted_tx2[15:0];
+    wire signed [15:0] scaled_ty1 = shifted_ty1[15:0];
+    wire signed [15:0] scaled_ty2 = shifted_ty2[15:0];
+    wire signed [15:0] scaled_tz1 = shifted_tz1[15:0];
+    wire signed [15:0] scaled_tz2 = shifted_tz2[15:0];
+
+    always @(posedge CLK or negedge RSTN) begin 
+        if (!RSTN) begin
+            r_tmin_x <= 16'd0; r_tmax_x <= 16'd0;
+            r_tmin_y <= 16'd0; r_tmax_y <= 16'd0;
+            r_tmin_z <= 16'd0; r_tmax_z <= 16'd0;
+        end else begin
+            if (pipe_valid[0]) begin 
+                // 광선 역진입 코너 케이스(Corner Case)에 대비한 하드웨어 크기 자동 정렬 멀티플렉서
+                r_tmin_x <= (scaled_tx1 > scaled_tx2) ? scaled_tx2 : scaled_tx1; 
+                r_tmax_x <= (scaled_tx1 > scaled_tx2) ? scaled_tx1 : scaled_tx2; 
+                r_tmin_y <= (scaled_ty1 > scaled_ty2) ? scaled_ty2 : scaled_ty1; 
+                r_tmax_y <= (scaled_ty1 > scaled_ty2) ? scaled_ty1 : scaled_ty2;
+                r_tmin_z <= (scaled_tz1 > scaled_tz2) ? scaled_tz2 : scaled_tz1;
+                r_tmax_z <= (scaled_tz1 > scaled_tz2) ? scaled_tz1 : scaled_tz2;
+            end else begin
+                r_tmin_x <= 16'd0; r_tmax_x <= 16'd0;
+                r_tmin_y <= 16'd0; r_tmax_y <= 16'd0;
+                r_tmin_z <= 16'd0; r_tmax_z <= 16'd0;
+            end
+        end
+    end
+
+    // =========================================================================
+    // [5] Reduction Tree & Final Output: 토너먼트 비교기 및 결과 포워딩
+    // =========================================================================
+    // 스테이지 2 출력값을 기반으로 조합 논리를 통해 '최솟값 중 최댓값(진입점)' 및 '최댓값 중 최솟값(이탈점)' 추출
+    
+    // X축과 Y축의 최소 진입점 중 더 먼 지점을 1차 추출 (1st Stage Max)
+    wire signed [15:0] t_min_inter = (r_tmin_x > r_tmin_y) ? r_tmin_x : r_tmin_y; 
+    // 1차 추출 값과 Z축 진입점을 최종 비교하여 '최종 진입점' 추출 (Final Max of Mins)
+    wire signed [15:0] t_min_final = (t_min_inter > r_tmin_z) ? t_min_inter : r_tmin_z; 
+
+    // X축과 Y축의 최대 이탈점 중 더 짧은 지점을 1차 추출 (1st Stage Min)
+    wire signed [15:0] t_max_inter = (r_tmax_x < r_tmax_y) ? r_tmax_x : r_tmax_y;  
+    // 1차 추출 값과 Z축 이탈점을 최종 비교하여 '최종 이탈점' 추출 (Final Min of Maxes)
+    wire signed [15:0] t_max_final = (t_max_inter < r_tmax_z) ? t_max_inter : r_tmax_z; 
+
+    // 상자 이탈 지점이 진입 지점보다 멀거나 같으며 양수일 때, 1클럭 내에 공간적 Hit 결론 생성
+    wire        pipeline_hit             = (t_max_final >= t_min_final) && (t_max_final >= 16'sd0); 
+    
+    // [31]: Hit 플래그, [30:16]: 패딩 비트, [15:0]: 충돌 거리 정답(t_min_final)으로 32비트 패킷 완성
+    wire [31:0] pipeline_computed_result = { pipeline_hit, 15'd0, t_min_final }; 
+
+    // =========================================================================
+    // Output Multiplexer: 스마트 바이패스 및 정규 연산 결과 출력 제어
+    // =========================================================================
+    always @(posedge CLK or negedge RSTN) begin 
+        if (!RSTN) begin
+            IPOUT          <= 32'd0;
+            IP_VALID       <= 1'b0;
+            cache_dir_x    <= 16'd0; cache_dir_y <= 16'd0; cache_dir_z <= 16'd0;
+            cache_hit_data <= 32'd0;
+            cache_valid    <= 1'b0;  
+        end else begin
+            // Handshake 프로토콜 준수를 위해 기본적으로 유효 신호를 클리어(Clear)
+            IP_VALID <= 1'b0; 
+
+            if (parsing_done && is_coherent) begin
+                // [Smart Bypass] 캐시 적중 시 연산을 생략하고 보관된 과거 정답을 1클럭 즉시 스킵 포워딩
+                IPOUT    <= cache_hit_data;
+                IP_VALID <= 1'b1;
+            end 
+            else if (pipe_valid[2]) begin 
+                // [Normal Compute] 토너먼트 트리의 조합 논리가 완전히 안정화된 시점에 출력 레지스터 갱신
+                IPOUT          <= pipeline_computed_result;
+                IP_VALID       <= 1'b1;
+                
+                // 후속 레이 트레이싱 오차 판별을 위해 현재 궤적 데이터를 아키텍처 캐시에 백업
+                cache_dir_x    <= ray_dir_x;
+                cache_dir_y    <= ray_dir_y;
+                cache_dir_z    <= ray_dir_z;
+                cache_hit_data <= pipeline_computed_result;
+                cache_valid    <= 1'b1; 
+            end 
+            else if (!ip_start) begin
+                // 가속 유닛 제어 해제 시 시스템 버스 플러시(Flush)를 통해 잔여 쓰레기 값 오염 차단
+                IPOUT          <= 32'd0;
+                cache_dir_x    <= 16'd0;
+                cache_dir_y    <= 16'd0;
+                cache_dir_z    <= 16'd0;
+                cache_hit_data <= 32'd0;
+                cache_valid    <= 1'b0; 
+            end 
+        end
+    end
+
+endmodule
