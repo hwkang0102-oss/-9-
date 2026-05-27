@@ -30,7 +30,7 @@
 					.CONSIG	()
     );
 */
-
+`timescale 1ns / 1ps
 module REGFILE #(parameter AW = 5, ENTRY = 32) (
     input    wire                CLK, 
     input    wire                RSTN,	 // RESET (ACTIVE LOW)
