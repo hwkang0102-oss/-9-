@@ -125,12 +125,13 @@ module CUSTOM_IP (
             
             // [오류 수정 1] 단일 펄스 이후 강제 Flush 구문 제거 -> 값 안전하게 유지(Latch)
             if (enable_core_pipeline) begin 
-                stg1_tx1 <= (box_min_x - ray_orig_x) * ray_inv_x;
-                stg1_tx2 <= (box_max_x - ray_orig_x) * ray_inv_x;
-                stg1_ty1 <= (box_min_y - ray_orig_y) * ray_inv_y;
-                stg1_ty2 <= (box_max_y - ray_orig_y) * ray_inv_y;
-                stg1_tz1 <= (box_min_z - ray_orig_z) * ray_inv_z;
-                stg1_tz2 <= (box_max_z - ray_orig_z) * ray_inv_z;
+                // [오류 수정 F] 방어적 코딩(Defensive Coding): 합성 툴의 암시적 부호 확장(Implicit Sign Extension) 오류를 원천 차단하기 위해 뺄셈 전 32비트로 명시적 부호 확장 적용
+                stg1_tx1 <= ($signed({{16{box_min_x[15]}}, box_min_x}) - $signed({{16{ray_orig_x[15]}}, ray_orig_x})) * $signed({{16{ray_inv_x[15]}}, ray_inv_x});
+                stg1_tx2 <= ($signed({{16{box_max_x[15]}}, box_max_x}) - $signed({{16{ray_orig_x[15]}}, ray_orig_x})) * $signed({{16{ray_inv_x[15]}}, ray_inv_x});
+                stg1_ty1 <= ($signed({{16{box_min_y[15]}}, box_min_y}) - $signed({{16{ray_orig_y[15]}}, ray_orig_y})) * $signed({{16{ray_inv_y[15]}}, ray_inv_y});
+                stg1_ty2 <= ($signed({{16{box_max_y[15]}}, box_max_y}) - $signed({{16{ray_orig_y[15]}}, ray_orig_y})) * $signed({{16{ray_inv_y[15]}}, ray_inv_y});
+                stg1_tz1 <= ($signed({{16{box_min_z[15]}}, box_min_z}) - $signed({{16{ray_orig_z[15]}}, ray_orig_z})) * $signed({{16{ray_inv_z[15]}}, ray_inv_z});
+                stg1_tz2 <= ($signed({{16{box_max_z[15]}}, box_max_z}) - $signed({{16{ray_orig_z[15]}}, ray_orig_z})) * $signed({{16{ray_inv_z[15]}}, ray_inv_z});
             end 
         end
     end
@@ -168,12 +169,15 @@ module CUSTOM_IP (
     // =========================================================================
     // [5] Reduction Tree & Final Output (Combinational Logic)
     // =========================================================================
+    // [보완] X, Y축 t_min 중 최댓값 도출 후 Z축과 비교 (광선 진입점인 최대 하한선 탐색)
     wire signed [15:0] t_min_inter = (r_tmin_x > r_tmin_y) ? r_tmin_x : r_tmin_y; 
     wire signed [15:0] t_min_final = (t_min_inter > r_tmin_z) ? t_min_inter : r_tmin_z; 
 
+    // [보완] X, Y축 t_max 중 최솟값 도출 후 Z축과 비교 (광선 이탈점인 최소 상한선 탐색)
     wire signed [15:0] t_max_inter = (r_tmax_x < r_tmax_y) ? r_tmax_x : r_tmax_y;  
     wire signed [15:0] t_max_final = (t_max_inter < r_tmax_z) ? t_max_inter : r_tmax_z; 
 
+    // [보완] 최종 교차(Hit) 판별: 상한선이 하한선보다 크거나 같고, 상한선이 0 이상(Box가 광선 진행 방향 앞)이어야 함
     wire        pipeline_hit             = (t_max_final >= t_min_final) && (t_max_final >= 16'sd0); 
     
     // [오류 수정 C] 광선이 Box 내부에서 시작될 경우 t_min_final은 음수가 됨. 이때는 t_max_final을 교차점으로 사용해야 함.
