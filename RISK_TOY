@@ -33,15 +33,14 @@ module RISC_TOY (
 
 
     //WB에서 넘어올 최종 데이터와 레지스터 쓰기 신호
-    wire [31:0] Final_WriteBack_Data = 32'd0; // (임시) 백엔드에서 연결할 와이어
-    wire        WB_RegWrite = 1'b0;           // (임시) 백엔드에서 연결할 와이어
-    wire [4:0]  WB_Rd_num   = 5'd0;           // (임시) 백엔드에서 연결할 와이어
-    
+    wire [31:0] Final_WriteBack_Data; 
+    wire        WB_RegWrite;           
+    wire [4:0]  WB_Rd_num;          
     // 해저드/제어 유닛에서 넘어올 신호
-    wire Stall_Flag = 1'b0;  
-    wire Flush_Flag = 1'b0;  
-    wire Branch_Taken = 1'b0; 
-    wire [31:0] Branch_Target = 32'd0;
+    wire Stall_Flag;  
+    wire Flush_Flag;  
+    wire Branch_Taken; 
+    wire [31:0] Branch_Target;
 
     
     // [1] IF 단계 
