@@ -11,7 +11,7 @@
     - Forwarding (EX/MEM, MEM/WB → EX), Load-Use Stall, Branch Flush 포함
 
 *****************************************/
-
+`timescale 1ns / 1ps
 
 ////////////////////////////////////
 //  TOP MODULE
