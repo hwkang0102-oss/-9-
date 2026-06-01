@@ -8,7 +8,7 @@
         2024000001    Lee Minho
 		2023000002	  Jake Jung
 *****************************************/
-`timescale 1ns/1ps
+
 //For RISC only
 module testbench;
 
